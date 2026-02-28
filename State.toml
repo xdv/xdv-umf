@@ -1,0 +1,11 @@
+﻿# XDV Unified Memory Fabric Workspace Manifest
+[workspace]
+name = "xdv_umf"
+version = "0.1.0"
+description = "Standalone Unified Memory Fabric project for domain-aware memory contracts and transfer semantics."
+[sector]
+name = "xdv_umf"
+path = "src"
+[target.x64-pc-none]
+linker = "ld"
+linker_flags = ["-nostdlib", "-static"]
