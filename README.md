@@ -1,45 +1,42 @@
-﻿# XDV Unified Memory Fabric
-Version: 0.1.0
+# XDV Unified Memory Fabric
+Version: 0.1.1
 Status: active-split
 Language: Dust Programming Language (DPL)
+
 ## Specification Alignment
 Primary specification: XDV-013 in xdv-spec.
+
 ## Purpose
-Standalone Unified Memory Fabric project for domain-aware memory contracts and transfer semantics.
-This repository was split from xdv-kernel/sector/xdv_umf into a standalone project so interfaces can evolve independently under stable versioning.
-## Split Provenance
-- Source sector: xdv-kernel/sector/xdv_umf
-- Imported Dust modules: src/umf.ds and src/umf_tests.ds
-- Import model: source-copy split (non-destructive to existing kernel sector)
-## Stable Interface Contract
-This project defines a stable external interface boundary in:
-- src/umf_interface.ds
-- docs/interface_contract.md
-Compatibility model:
-- Semantic interface versioning (major/minor/patch)
-- Additive changes are minor releases
-- Breaking signature/semantic changes are major releases
-- Deprecated APIs remain one minor cycle before removal
-## Repository Layout
-- src/ : implementation and interface surfaces
-- tests/ : standalone tests and integration placeholders
-- docs/ : architecture and interface docs
-- State.toml : workspace manifest
-- changelog.md : release notes
-- LICENSE : copied from xdv-os/LICENSE
+`xdv-umf` provides deterministic, domain-aware memory control for K/Q/Phi domains.
+It enforces:
+- memory contract validation,
+- no-clone policy for Q and Phi state,
+- coherence policy for Phi state,
+- cross-domain transfer policy and atomicity gates,
+- direct mapping isolation boundaries.
+
+## Scope Implemented in 0.1.1
+- K/Q/Phi-aware memory contracts (`create_memory_contract`, `validate_memory_contract`).
+- Deterministic domain allocation path (`domain_alloc_contract`) with region-aware addressing.
+- No-clone and coherence enforcement in protection validation.
+- Transfer-policy controls for K<->Q, K<->Phi, and Q<->Phi bridge rules.
+- Isolation check API for direct mapping rejection.
+- Contract/isolation/transfer tests in `src/umf_tests.ds`.
+
 ## Public Surface
-- Forge module: XdvUmf
-- Primary implementation: src/umf.ds
-- Stable interface profile: src/umf_interface.ds
-## Dependencies
-Planned dependencies:
-- xdv-dal, xdv-kernel, xdv-runtime
-- Dust toolchain and runtime packages required by integration profile
+- Forge module: `XdvUmf`
+- Implementation: `src/umf.ds`
+- Interface profile: `src/umf_interface.ds`
+
+Version APIs:
+- `xdv_umf_interface_version_major/minor/patch`
+- `xdv_umf_contract_api_version`
+- `xdv_umf_isolation_api_version`
+- `xdv_umf_transfer_api_version`
+
 ## Build
-dust check xdv-umf/src
-## Test
-dust test xdv-umf/tests
+`cargo run --manifest-path dust/Cargo.toml -- check xdv-umf/src`
+
 ## Integration Notes
-- Kernel integration should consume this project via explicit version pinning.
-- xdv-os integration should use release tags from this repo, not kernel-internal paths.
-- API changes must update docs/interface_contract.md and changelog.md in the same change set.
+- `xdv-kernel` integration remains compatible via existing `xdv_umf_interface_version_*` exports.
+- Existing wrapper APIs (`domain_alloc`, `alloc_qstate_memory`, `transfer_qstate`, etc.) remain available.

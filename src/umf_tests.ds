@@ -1,71 +1,243 @@
 // File: umf_tests.ds - This file is part of XDV
 // Copyright (c) 2026 Dust LLC, and Contributors
 // Description:
-//   XDV Kernel - UMF Tests
+//   XDV UMF tests for domain contracts, no-clone/coherence enforcement, and transfer/isolation policy.
 
 forge UmfTests {
 
-    proc K::test_memory_region_type_enum() {
-        let a = 1;
-        return 0;
+    const TEST_PASS: UInt32 = 0;
+    const TEST_FAIL: UInt32 = 1;
+
+    const STATUS_OK: UInt32 = 0;
+    const STATUS_ISOLATION_VIOLATION: UInt32 = 4;
+    const STATUS_TRANSFER_POLICY_DENIED: UInt32 = 5;
+    const STATUS_CLONE_BLOCKED: UInt32 = 6;
+    const STATUS_COHERENCE_VIOLATION: UInt32 = 7;
+    const STATUS_INVALID_CONTRACT: UInt32 = 8;
+    const STATUS_ATOMICITY_REQUIRED: UInt32 = 9;
+
+    const DOMAIN_K: UInt8 = 0;
+    const DOMAIN_Q: UInt8 = 1;
+    const DOMAIN_PHI: UInt8 = 2;
+
+    const MEM_PROT_READ: UInt64 = 1;
+    const MEM_PROT_QSTATE: UInt64 = 8;
+    const MEM_PROT_PHISTATE: UInt64 = 16;
+    const MEM_PROT_NO_CLONE: UInt64 = 32;
+    const MEM_PROT_COHERENCE: UInt64 = 64;
+
+    const TRANSFER_POLICY_ATOMIC: UInt64 = 1;
+    const TRANSFER_POLICY_K_TO_Q_INIT: UInt64 = 2;
+    const TRANSFER_POLICY_Q_TO_K_MEASURE: UInt64 = 4;
+    const TRANSFER_POLICY_K_TO_PHI_INIT: UInt64 = 8;
+    const TRANSFER_POLICY_PHI_TO_K_EVAL: UInt64 = 16;
+    const TRANSFER_POLICY_Q_PHI_BRIDGE: UInt64 = 32;
+
+    const NULL_PTR: UInt64 = 0;
+
+    proc K::expect_status(actual: UInt32, expected: UInt32) -> UInt32 {
+        if actual == expected {
+            return TEST_PASS;
+        } else {
+            return TEST_FAIL;
+        }
     }
 
-    proc K::test_memory_protection_constants() {
-        let a = 1;
-        let b = 2;
-        return 0;
+    proc K::test_k_contract_blocks_qstate_flag() -> UInt32 {
+        let protection = MEM_PROT_READ + MEM_PROT_QSTATE;
+        let status = validate_domain_protection(DOMAIN_K, protection);
+        return expect_status(status, STATUS_ISOLATION_VIOLATION);
     }
 
-    proc K::test_domain_alloc_k_domain() {
-        return 0;
+    proc K::test_q_contract_requires_no_clone_flag() -> UInt32 {
+        let protection = MEM_PROT_READ + MEM_PROT_QSTATE;
+        let status = validate_domain_protection(DOMAIN_Q, protection);
+        return expect_status(status, STATUS_CLONE_BLOCKED);
     }
 
-    proc K::test_domain_alloc_q_domain() {
-        return 0;
+    proc K::test_phi_contract_requires_coherence_flag() -> UInt32 {
+        let protection = MEM_PROT_READ + MEM_PROT_PHISTATE + MEM_PROT_NO_CLONE;
+        let status = validate_domain_protection(DOMAIN_PHI, protection);
+        return expect_status(status, STATUS_COHERENCE_VIOLATION);
     }
 
-    proc K::test_domain_alloc_zero_size() {
-        return 0;
+    proc K::test_q_alloc_contract_success() -> UInt32 {
+        let protection = MEM_PROT_READ + MEM_PROT_QSTATE + MEM_PROT_NO_CLONE;
+        let ptr = domain_alloc_contract(DOMAIN_Q, 5, 128, protection, 9, 7);
+        if ptr == NULL_PTR {
+            return TEST_FAIL;
+        } else {
+            return TEST_PASS;
+        }
     }
 
-    proc K::test_alloc_qstate_memory() {
-        return 0;
+    proc K::test_phi_alloc_contract_success() -> UInt32 {
+        let protection = MEM_PROT_READ + MEM_PROT_PHISTATE + MEM_PROT_NO_CLONE + MEM_PROT_COHERENCE;
+        let ptr = domain_alloc_contract(DOMAIN_PHI, 6, 128, protection, 9, 7);
+        if ptr == NULL_PTR {
+            return TEST_FAIL;
+        } else {
+            return TEST_PASS;
+        }
     }
 
-    proc K::test_alloc_phi_state_memory() {
-        return 0;
+    proc K::test_clone_qstate_blocked() -> UInt32 {
+        let ptr = alloc_qstate_memory(64);
+        if ptr == NULL_PTR {
+            return TEST_FAIL;
+        } else {
+            let protection = MEM_PROT_READ + MEM_PROT_QSTATE + MEM_PROT_NO_CLONE;
+            let status = clone_qstate_status(ptr, protection);
+            if status == STATUS_CLONE_BLOCKED {
+                let cloned = clone_qstate(ptr);
+                if cloned == NULL_PTR {
+                    return TEST_PASS;
+                } else {
+                    return TEST_FAIL;
+                }
+            } else {
+                return TEST_FAIL;
+            }
+        }
     }
 
-    proc K::test_clone_qstate_fails() {
-        return 0;
+    proc K::test_transfer_policy_denies_q_to_phi_without_bridge() -> UInt32 {
+        let ptr = alloc_qstate_memory(64);
+        if ptr == NULL_PTR {
+            return TEST_FAIL;
+        } else {
+            let policy = TRANSFER_POLICY_ATOMIC + TRANSFER_POLICY_Q_TO_K_MEASURE;
+            let status = transfer_qstate_with_policy(ptr, DOMAIN_PHI, policy, 3, 10);
+            return expect_status(status, STATUS_TRANSFER_POLICY_DENIED);
+        }
     }
 
-    proc K::test_transfer_qstate_to_q_domain_fails() {
-        return 0;
+    proc K::test_transfer_policy_allows_q_to_phi_with_bridge() -> UInt32 {
+        let ptr = alloc_qstate_memory(64);
+        if ptr == NULL_PTR {
+            return TEST_FAIL;
+        } else {
+            let policy = TRANSFER_POLICY_ATOMIC + TRANSFER_POLICY_Q_PHI_BRIDGE;
+            let status = transfer_qstate_with_policy(ptr, DOMAIN_PHI, policy, 3, 10);
+            return expect_status(status, STATUS_OK);
+        }
     }
 
-    proc K::test_validate_phi_coherence() {
-        return 0;
+    proc K::test_transfer_policy_requires_atomic_flag() -> UInt32 {
+        let ptr = alloc_qstate_memory(64);
+        if ptr == NULL_PTR {
+            return TEST_FAIL;
+        } else {
+            let policy = TRANSFER_POLICY_Q_PHI_BRIDGE;
+            let status = transfer_qstate_with_policy(ptr, DOMAIN_PHI, policy, 3, 10);
+            return expect_status(status, STATUS_ATOMICITY_REQUIRED);
+        }
     }
 
-    proc K::test_get_domain_memory_stats_k() {
-        return 0;
+    proc K::test_direct_mapping_isolation_violation() -> UInt32 {
+        let status = request_direct_mapping(DOMAIN_K, DOMAIN_Q);
+        return expect_status(status, STATUS_ISOLATION_VIOLATION);
     }
 
-    proc K::test_get_domain_memory_stats_q() {
-        return 0;
+    proc K::test_contract_create_and_validate() -> UInt32 {
+        let protection = MEM_PROT_READ + MEM_PROT_QSTATE + MEM_PROT_NO_CLONE;
+        let policy = TRANSFER_POLICY_ATOMIC + TRANSFER_POLICY_K_TO_Q_INIT;
+        let contract_id = create_memory_contract(11, DOMAIN_K, DOMAIN_Q, 64, protection, 7, policy, 9);
+        if contract_id == 0 {
+            return TEST_FAIL;
+        } else {
+            let valid = validate_memory_contract(contract_id, 11, DOMAIN_K, DOMAIN_Q, 64, protection, 7, policy, 9);
+            if valid == STATUS_OK {
+                let invalid = validate_memory_contract(contract_id + 1, 11, DOMAIN_K, DOMAIN_Q, 64, protection, 7, policy, 9);
+                return expect_status(invalid, STATUS_INVALID_CONTRACT);
+            } else {
+                return TEST_FAIL;
+            }
+        }
     }
 
-    proc K::test_get_domain_memory_stats_phi() {
-        return 0;
+    proc K::test_validate_phi_coherence_contract() -> UInt32 {
+        let phi_ptr = alloc_phi_state_memory(64);
+        if phi_ptr == NULL_PTR {
+            return TEST_FAIL;
+        } else {
+            let phi_status = validate_phi_coherence(phi_ptr);
+            if phi_status == STATUS_OK {
+                let q_ptr = alloc_qstate_memory(64);
+                if q_ptr == NULL_PTR {
+                    return TEST_FAIL;
+                } else {
+                    let q_status = validate_phi_coherence(q_ptr);
+                    return expect_status(q_status, STATUS_COHERENCE_VIOLATION);
+                }
+            } else {
+                return TEST_FAIL;
+            }
+        }
     }
 
-    proc K::test_check_memory_protection() {
-        return 0;
+    proc K::run_all() -> UInt32 {
+        let t1 = test_k_contract_blocks_qstate_flag();
+        if t1 == TEST_PASS {
+            let t2 = test_q_contract_requires_no_clone_flag();
+            if t2 == TEST_PASS {
+                let t3 = test_phi_contract_requires_coherence_flag();
+                if t3 == TEST_PASS {
+                    let t4 = test_q_alloc_contract_success();
+                    if t4 == TEST_PASS {
+                        let t5 = test_phi_alloc_contract_success();
+                        if t5 == TEST_PASS {
+                            let t6 = test_clone_qstate_blocked();
+                            if t6 == TEST_PASS {
+                                let t7 = test_transfer_policy_denies_q_to_phi_without_bridge();
+                                if t7 == TEST_PASS {
+                                    let t8 = test_transfer_policy_allows_q_to_phi_with_bridge();
+                                    if t8 == TEST_PASS {
+                                        let t9 = test_transfer_policy_requires_atomic_flag();
+                                        if t9 == TEST_PASS {
+                                            let t10 = test_direct_mapping_isolation_violation();
+                                            if t10 == TEST_PASS {
+                                                let t11 = test_contract_create_and_validate();
+                                                if t11 == TEST_PASS {
+                                                    let t12 = test_validate_phi_coherence_contract();
+                                                    if t12 == TEST_PASS {
+                                                        return TEST_PASS;
+                                                    } else {
+                                                        return TEST_FAIL;
+                                                    }
+                                                } else {
+                                                    return TEST_FAIL;
+                                                }
+                                            } else {
+                                                return TEST_FAIL;
+                                            }
+                                        } else {
+                                            return TEST_FAIL;
+                                        }
+                                    } else {
+                                        return TEST_FAIL;
+                                    }
+                                } else {
+                                    return TEST_FAIL;
+                                }
+                            } else {
+                                return TEST_FAIL;
+                            }
+                        } else {
+                            return TEST_FAIL;
+                        }
+                    } else {
+                        return TEST_FAIL;
+                    }
+                } else {
+                    return TEST_FAIL;
+                }
+            } else {
+                return TEST_FAIL;
+            }
+        } else {
+            return TEST_FAIL;
+        }
     }
-
-    proc K::test_set_memory_protection() {
-        return 0;
-    }
-
 }
+

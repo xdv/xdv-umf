@@ -1,7 +1,8 @@
 // File: umf.ds - This file is part of XDV
 // Copyright (c) 2026 Dust LLC, and Contributors
 // Description:
-//   XDV Kernel - Unified Memory Fabric (UMF)
+//   XDV Unified Memory Fabric (UMF)
+//   K/Q/Phi-aware contracts, no-clone/coherence enforcement, and transfer policy guards.
 
 forge XdvUmf {
 
@@ -14,28 +15,73 @@ forge XdvUmf {
     const MEM_PROT_NO_CLONE: UInt64 = 32;
     const MEM_PROT_COHERENCE: UInt64 = 64;
 
+    const TRANSFER_POLICY_ATOMIC: UInt64 = 1;
+    const TRANSFER_POLICY_K_TO_Q_INIT: UInt64 = 2;
+    const TRANSFER_POLICY_Q_TO_K_MEASURE: UInt64 = 4;
+    const TRANSFER_POLICY_K_TO_PHI_INIT: UInt64 = 8;
+    const TRANSFER_POLICY_PHI_TO_K_EVAL: UInt64 = 16;
+    const TRANSFER_POLICY_Q_PHI_BRIDGE: UInt64 = 32;
+
     const STATUS_OK: UInt32 = 0;
     const STATUS_INVALID_REQUEST: UInt32 = 1;
+    const STATUS_INVALID_DOMAIN: UInt32 = 2;
+    const STATUS_INVALID_PROTECTION: UInt32 = 3;
+    const STATUS_ISOLATION_VIOLATION: UInt32 = 4;
+    const STATUS_TRANSFER_POLICY_DENIED: UInt32 = 5;
+    const STATUS_CLONE_BLOCKED: UInt32 = 6;
+    const STATUS_COHERENCE_VIOLATION: UInt32 = 7;
+    const STATUS_INVALID_CONTRACT: UInt32 = 8;
+    const STATUS_ATOMICITY_REQUIRED: UInt32 = 9;
     const STATUS_DOMAIN_UNAVAILABLE: UInt32 = 100;
 
     const DOMAIN_K: UInt8 = 0;
     const DOMAIN_Q: UInt8 = 1;
     const DOMAIN_PHI: UInt8 = 2;
+    const DOMAIN_INVALID: UInt8 = 255;
 
     const NULL_PTR: UInt64 = 0;
-    const QDOMAIN_PTR_UNAVAILABLE: UInt64 = 4294967294;
-    const PHIDOMAIN_PTR_UNAVAILABLE: UInt64 = 4294967295;
     const MEMORY_STATS_UNAVAILABLE: UInt64 = 100;
 
-    const SHARED_POOL_BASE: UInt64 = 33554432;
+    const K_REGION_BASE: UInt64 = 33554432;
+    const K_REGION_SIZE: UInt64 = 8388608;
+
+    const Q_REGION_BASE: UInt64 = 50331648;
+    const Q_REGION_SIZE: UInt64 = 8388608;
+
+    const PHI_REGION_BASE: UInt64 = 67108864;
+    const PHI_REGION_SIZE: UInt64 = 8388608;
+
+    const SHARED_POOL_BASE: UInt64 = 83886080;
     const SHARED_POOL_SIZE: UInt64 = 1048576;
+
+    const CONTRACT_SOURCE_FACTOR: UInt64 = 1000000000000000;
+    const CONTRACT_TARGET_FACTOR: UInt64 = 100000000000000;
+    const CONTRACT_SIZE_FACTOR: UInt64 = 1000000000;
+    const CONTRACT_PROTECTION_FACTOR: UInt64 = 1000000;
+    const CONTRACT_PROCESS_FACTOR: UInt64 = 1000;
+    const CONTRACT_POLICY_FACTOR: UInt64 = 10;
+
+    const CONTRACT_SIZE_CYCLE: UInt64 = 100000;
+    const CONTRACT_PROTECTION_CYCLE: UInt64 = 1000;
+    const CONTRACT_PROCESS_CYCLE: UInt64 = 1000;
+    const CONTRACT_POLICY_CYCLE: UInt64 = 100;
+    const CONTRACT_CAPABILITY_CYCLE: UInt64 = 10;
+    const CONTRACT_TIMESTAMP_CYCLE: UInt64 = 10;
+
+    const UMF_INTERFACE_VERSION_MAJOR: UInt32 = 0;
+    const UMF_INTERFACE_VERSION_MINOR: UInt32 = 1;
+    const UMF_INTERFACE_VERSION_PATCH: UInt32 = 0;
+
+    const UMF_CONTRACT_API_VERSION: UInt32 = 1;
+    const UMF_ISOLATION_API_VERSION: UInt32 = 1;
+    const UMF_TRANSFER_API_VERSION: UInt32 = 1;
 
     proc K::umf_init() -> UInt32 {
         emit "XDV UMF: Initializing unified memory fabric";
         init_k_memory();
         init_shared_memory();
-        emit "XDV UMF: K-Domain memory initialized";
-        emit "XDV UMF: Q/Phi memory pending hardware detection";
+        emit "XDV UMF: domain-aware memory contracts online";
+        emit "XDV UMF: no-clone and coherence enforcement enabled";
         return STATUS_OK;
     }
 
@@ -49,44 +95,486 @@ forge XdvUmf {
         return STATUS_OK;
     }
 
-    proc K::domain_alloc(domain: UInt8, size: UInt64, protection: UInt64) -> UInt64 {
-        if size == 0 {
-            return NULL_PTR;
+    proc K::is_valid_domain(domain: UInt8) -> UInt32 {
+        if domain == DOMAIN_K {
+            return 1;
         } else {
-            if protection == MEM_PROT_NONE {
-                return NULL_PTR;
+            if domain == DOMAIN_Q {
+                return 1;
             } else {
-                if domain == DOMAIN_K {
-                    return SHARED_POOL_BASE + size;
+                if domain == DOMAIN_PHI {
+                    return 1;
                 } else {
-                    if domain == DOMAIN_Q {
-                        return QDOMAIN_PTR_UNAVAILABLE;
+                    return 0;
+                }
+            }
+        }
+    }
+
+    proc K::has_flag(mask: UInt64, flag: UInt64) -> UInt32 {
+        let masked = mask & flag;
+        if masked == flag {
+            return 1;
+        } else {
+            return 0;
+        }
+    }
+
+    proc K::is_nonzero(value: UInt64) -> UInt32 {
+        if value == 0 {
+            return 0;
+        } else {
+            return 1;
+        }
+    }
+
+    proc K::validate_no_clone_policy(domain: UInt8, protection: UInt64) -> UInt32 {
+        if domain == DOMAIN_Q {
+            let has_no_clone = has_flag(protection, MEM_PROT_NO_CLONE);
+            if has_no_clone == 1 {
+                return STATUS_OK;
+            } else {
+                return STATUS_CLONE_BLOCKED;
+            }
+        } else {
+            if domain == DOMAIN_PHI {
+                let has_no_clone = has_flag(protection, MEM_PROT_NO_CLONE);
+                if has_no_clone == 1 {
+                    return STATUS_OK;
+                } else {
+                    return STATUS_CLONE_BLOCKED;
+                }
+            } else {
+                return STATUS_OK;
+            }
+        }
+    }
+
+    proc K::validate_coherence_policy(domain: UInt8, protection: UInt64) -> UInt32 {
+        if domain == DOMAIN_PHI {
+            let has_coherence = has_flag(protection, MEM_PROT_COHERENCE);
+            if has_coherence == 1 {
+                return STATUS_OK;
+            } else {
+                return STATUS_COHERENCE_VIOLATION;
+            }
+        } else {
+            if domain == DOMAIN_K {
+                let has_coherence = has_flag(protection, MEM_PROT_COHERENCE);
+                if has_coherence == 1 {
+                    return STATUS_ISOLATION_VIOLATION;
+                } else {
+                    return STATUS_OK;
+                }
+            } else {
+                if domain == DOMAIN_Q {
+                    let has_coherence = has_flag(protection, MEM_PROT_COHERENCE);
+                    if has_coherence == 1 {
+                        return STATUS_ISOLATION_VIOLATION;
                     } else {
-                        if domain == DOMAIN_PHI {
-                            return PHIDOMAIN_PTR_UNAVAILABLE;
-                        } else {
-                            return NULL_PTR;
-                        }
+                        return STATUS_OK;
+                    }
+                } else {
+                    return STATUS_INVALID_DOMAIN;
+                }
+            }
+        }
+    }
+
+    proc K::validate_domain_protection(domain: UInt8, protection: UInt64) -> UInt32 {
+        if protection == MEM_PROT_NONE {
+            return STATUS_INVALID_PROTECTION;
+        } else {
+            let valid = is_valid_domain(domain);
+            if valid == 1 {
+            } else {
+                return STATUS_INVALID_DOMAIN;
+            }
+
+            if domain == DOMAIN_K {
+                let has_q = has_flag(protection, MEM_PROT_QSTATE);
+                if has_q == 1 {
+                    return STATUS_ISOLATION_VIOLATION;
+                }
+                let has_phi = has_flag(protection, MEM_PROT_PHISTATE);
+                if has_phi == 1 {
+                    return STATUS_ISOLATION_VIOLATION;
+                }
+                let coherence = validate_coherence_policy(domain, protection);
+                return coherence;
+            } else {
+                if domain == DOMAIN_Q {
+                    let has_q = has_flag(protection, MEM_PROT_QSTATE);
+                    if has_q == 1 {
+                    } else {
+                        return STATUS_INVALID_PROTECTION;
+                    }
+
+                    let has_phi = has_flag(protection, MEM_PROT_PHISTATE);
+                    if has_phi == 1 {
+                        return STATUS_ISOLATION_VIOLATION;
+                    }
+
+                    let no_clone = validate_no_clone_policy(domain, protection);
+                    if no_clone == STATUS_OK {
+                    } else {
+                        return no_clone;
+                    }
+
+                    let coherence = validate_coherence_policy(domain, protection);
+                    if coherence == STATUS_OK {
+                        return STATUS_OK;
+                    } else {
+                        return coherence;
+                    }
+                } else {
+                    let has_phi = has_flag(protection, MEM_PROT_PHISTATE);
+                    if has_phi == 1 {
+                    } else {
+                        return STATUS_INVALID_PROTECTION;
+                    }
+
+                    let has_q = has_flag(protection, MEM_PROT_QSTATE);
+                    if has_q == 1 {
+                        return STATUS_ISOLATION_VIOLATION;
+                    }
+
+                    let no_clone = validate_no_clone_policy(domain, protection);
+                    if no_clone == STATUS_OK {
+                    } else {
+                        return no_clone;
+                    }
+
+                    let coherence = validate_coherence_policy(domain, protection);
+                    if coherence == STATUS_OK {
+                        return STATUS_OK;
+                    } else {
+                        return coherence;
                     }
                 }
             }
         }
     }
 
-    proc K::alloc_qstate_memory(size: UInt64) -> UInt64 {
-        if size == 0 {
-            return NULL_PTR;
+    proc K::region_base(domain: UInt8) -> UInt64 {
+        if domain == DOMAIN_K {
+            return K_REGION_BASE;
         } else {
-            return QDOMAIN_PTR_UNAVAILABLE;
+            if domain == DOMAIN_Q {
+                return Q_REGION_BASE;
+            } else {
+                if domain == DOMAIN_PHI {
+                    return PHI_REGION_BASE;
+                } else {
+                    return NULL_PTR;
+                }
+            }
         }
     }
 
-    proc K::alloc_phi_state_memory(size: UInt64) -> UInt64 {
+    proc K::region_size(domain: UInt8) -> UInt64 {
+        if domain == DOMAIN_K {
+            return K_REGION_SIZE;
+        } else {
+            if domain == DOMAIN_Q {
+                return Q_REGION_SIZE;
+            } else {
+                if domain == DOMAIN_PHI {
+                    return PHI_REGION_SIZE;
+                } else {
+                    return 0;
+                }
+            }
+        }
+    }
+
+    proc K::normalize_u64(value: UInt64, cycle: UInt64) -> UInt64 {
+        if cycle == 0 {
+            return 0;
+        } else {
+            let quotient = value / cycle;
+            return value - (quotient * cycle);
+        }
+    }
+
+    proc K::deterministic_offset(size: UInt64, process_id: UInt32, logical_timestamp: UInt32, size_limit: UInt64) -> UInt64 {
+        if size > size_limit {
+            return 0;
+        } else {
+            if size == size_limit {
+                return 0;
+            } else {
+                let window = size_limit - size;
+                let cycle = window + 1;
+                let seed = size + process_id + logical_timestamp;
+                return normalize_u64(seed, cycle);
+            }
+        }
+    }
+
+    proc K::ptr_in_region(ptr: UInt64, base: UInt64, size: UInt64) -> UInt32 {
+        if ptr < base {
+            return 0;
+        } else {
+            let limit = base + size;
+            if ptr < limit {
+                return 1;
+            } else {
+                return 0;
+            }
+        }
+    }
+
+    proc K::resolve_domain_from_ptr(ptr: UInt64) -> UInt8 {
+        let in_k = ptr_in_region(ptr, K_REGION_BASE, K_REGION_SIZE);
+        if in_k == 1 {
+            return DOMAIN_K;
+        } else {
+            let in_q = ptr_in_region(ptr, Q_REGION_BASE, Q_REGION_SIZE);
+            if in_q == 1 {
+                return DOMAIN_Q;
+            } else {
+                let in_phi = ptr_in_region(ptr, PHI_REGION_BASE, PHI_REGION_SIZE);
+                if in_phi == 1 {
+                    return DOMAIN_PHI;
+                } else {
+                    return DOMAIN_INVALID;
+                }
+            }
+        }
+    }
+
+    proc K::is_transfer_allowed(source_domain: UInt8, target_domain: UInt8, policy_flags: UInt64) -> UInt32 {
+        let source_valid = is_valid_domain(source_domain);
+        if source_valid == 1 {
+        } else {
+            return 0;
+        }
+
+        let target_valid = is_valid_domain(target_domain);
+        if target_valid == 1 {
+        } else {
+            return 0;
+        }
+
+        if source_domain == target_domain {
+            return 1;
+        } else {
+            if source_domain == DOMAIN_K {
+                if target_domain == DOMAIN_Q {
+                    return has_flag(policy_flags, TRANSFER_POLICY_K_TO_Q_INIT);
+                } else {
+                    if target_domain == DOMAIN_PHI {
+                        return has_flag(policy_flags, TRANSFER_POLICY_K_TO_PHI_INIT);
+                    } else {
+                        return 0;
+                    }
+                }
+            } else {
+                if source_domain == DOMAIN_Q {
+                    if target_domain == DOMAIN_K {
+                        return has_flag(policy_flags, TRANSFER_POLICY_Q_TO_K_MEASURE);
+                    } else {
+                        if target_domain == DOMAIN_PHI {
+                            return has_flag(policy_flags, TRANSFER_POLICY_Q_PHI_BRIDGE);
+                        } else {
+                            return 0;
+                        }
+                    }
+                } else {
+                    if source_domain == DOMAIN_PHI {
+                        if target_domain == DOMAIN_K {
+                            return has_flag(policy_flags, TRANSFER_POLICY_PHI_TO_K_EVAL);
+                        } else {
+                            if target_domain == DOMAIN_Q {
+                                return has_flag(policy_flags, TRANSFER_POLICY_Q_PHI_BRIDGE);
+                            } else {
+                                return 0;
+                            }
+                        }
+                    } else {
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
+    proc K::enforce_atomic_transfer(policy_flags: UInt64) -> UInt32 {
+        let atomic = has_flag(policy_flags, TRANSFER_POLICY_ATOMIC);
+        if atomic == 1 {
+            return STATUS_OK;
+        } else {
+            return STATUS_ATOMICITY_REQUIRED;
+        }
+    }
+
+    proc K::request_direct_mapping(source_domain: UInt8, target_domain: UInt8) -> UInt32 {
+        if source_domain == target_domain {
+            return STATUS_OK;
+        } else {
+            return STATUS_ISOLATION_VIOLATION;
+        }
+    }
+
+    proc K::create_memory_contract(
+        process_id: UInt32,
+        source_domain: UInt8,
+        target_domain: UInt8,
+        size: UInt64,
+        protection: UInt64,
+        capability_token: UInt64,
+        policy_flags: UInt64,
+        logical_timestamp: UInt32
+    ) -> UInt64 {
+        if size == 0 {
+            return 0;
+        }
+
+        let cap = is_nonzero(capability_token);
+        if cap == 1 {
+        } else {
+            return 0;
+        }
+
+        let source_valid = is_valid_domain(source_domain);
+        if source_valid == 1 {
+        } else {
+            return 0;
+        }
+
+        let target_valid = is_valid_domain(target_domain);
+        if target_valid == 1 {
+        } else {
+            return 0;
+        }
+
+        let protection_status = validate_domain_protection(target_domain, protection);
+        if protection_status == STATUS_OK {
+        } else {
+            return 0;
+        }
+
+        let transfer = is_transfer_allowed(source_domain, target_domain, policy_flags);
+        if transfer == 1 {
+        } else {
+            return 0;
+        }
+
+        if source_domain == target_domain {
+        } else {
+            let atomic = enforce_atomic_transfer(policy_flags);
+            if atomic == STATUS_OK {
+            } else {
+                return 0;
+            }
+        }
+
+        let size_norm = normalize_u64(size, CONTRACT_SIZE_CYCLE);
+        let prot_norm = normalize_u64(protection, CONTRACT_PROTECTION_CYCLE);
+        let proc_norm = normalize_u64(process_id, CONTRACT_PROCESS_CYCLE);
+        let policy_norm = normalize_u64(policy_flags, CONTRACT_POLICY_CYCLE);
+        let cap_norm = normalize_u64(capability_token, CONTRACT_CAPABILITY_CYCLE);
+        let ts_norm = normalize_u64(logical_timestamp, CONTRACT_TIMESTAMP_CYCLE);
+
+        return (source_domain * CONTRACT_SOURCE_FACTOR)
+            + (target_domain * CONTRACT_TARGET_FACTOR)
+            + (size_norm * CONTRACT_SIZE_FACTOR)
+            + (prot_norm * CONTRACT_PROTECTION_FACTOR)
+            + (proc_norm * CONTRACT_PROCESS_FACTOR)
+            + (policy_norm * CONTRACT_POLICY_FACTOR)
+            + cap_norm
+            + ts_norm;
+    }
+
+    proc K::validate_memory_contract(
+        contract_id: UInt64,
+        process_id: UInt32,
+        source_domain: UInt8,
+        target_domain: UInt8,
+        size: UInt64,
+        protection: UInt64,
+        capability_token: UInt64,
+        policy_flags: UInt64,
+        logical_timestamp: UInt32
+    ) -> UInt32 {
+        if contract_id == 0 {
+            return STATUS_INVALID_CONTRACT;
+        }
+
+        let expected = create_memory_contract(
+            process_id,
+            source_domain,
+            target_domain,
+            size,
+            protection,
+            capability_token,
+            policy_flags,
+            logical_timestamp
+        );
+
+        if expected == 0 {
+            return STATUS_INVALID_CONTRACT;
+        } else {
+            if expected == contract_id {
+                return STATUS_OK;
+            } else {
+                return STATUS_INVALID_CONTRACT;
+            }
+        }
+    }
+
+    proc K::domain_alloc_contract(
+        domain: UInt8,
+        process_id: UInt32,
+        size: UInt64,
+        protection: UInt64,
+        capability_token: UInt64,
+        logical_timestamp: UInt32
+    ) -> UInt64 {
         if size == 0 {
             return NULL_PTR;
-        } else {
-            return PHIDOMAIN_PTR_UNAVAILABLE;
         }
+
+        let cap = is_nonzero(capability_token);
+        if cap == 1 {
+        } else {
+            return NULL_PTR;
+        }
+
+        let protection_status = validate_domain_protection(domain, protection);
+        if protection_status == STATUS_OK {
+        } else {
+            return NULL_PTR;
+        }
+
+        let base = region_base(domain);
+        let limit = region_size(domain);
+
+        if base == 0 {
+            return NULL_PTR;
+        }
+
+        if size > limit {
+            return NULL_PTR;
+        }
+
+        let offset = deterministic_offset(size, process_id, logical_timestamp, limit);
+        return base + offset;
+    }
+
+    proc K::domain_alloc(domain: UInt8, size: UInt64, protection: UInt64) -> UInt64 {
+        return domain_alloc_contract(domain, 1, size, protection, 1, 1);
+    }
+
+    proc K::alloc_qstate_memory(size: UInt64) -> UInt64 {
+        let protection = MEM_PROT_READ + MEM_PROT_QSTATE + MEM_PROT_NO_CLONE;
+        return domain_alloc_contract(DOMAIN_Q, 1, size, protection, 1, 1);
+    }
+
+    proc K::alloc_phi_state_memory(size: UInt64) -> UInt64 {
+        let protection = MEM_PROT_READ + MEM_PROT_PHISTATE + MEM_PROT_NO_CLONE + MEM_PROT_COHERENCE;
+        return domain_alloc_contract(DOMAIN_PHI, 1, size, protection, 1, 1);
     }
 
     proc K::alloc_shared_memory(size: UInt64) -> UInt64 {
@@ -109,54 +597,192 @@ forge XdvUmf {
         }
     }
 
+    proc K::clone_qstate_status(ptr: UInt64, protection: UInt64) -> UInt32 {
+        if ptr == NULL_PTR {
+            return STATUS_INVALID_REQUEST;
+        }
+
+        let domain = resolve_domain_from_ptr(ptr);
+        if domain == DOMAIN_Q {
+            let no_clone = validate_no_clone_policy(DOMAIN_Q, protection);
+            if no_clone == STATUS_OK {
+                return STATUS_CLONE_BLOCKED;
+            } else {
+                return no_clone;
+            }
+        } else {
+            return STATUS_INVALID_REQUEST;
+        }
+    }
+
     proc K::clone_qstate(ptr: UInt64) -> UInt64 {
         if ptr == NULL_PTR {
             return NULL_PTR;
         } else {
-            return QDOMAIN_PTR_UNAVAILABLE;
+            return NULL_PTR;
         }
     }
 
-    proc K::transfer_qstate(ptr: UInt64, target_domain: UInt8) -> UInt32 {
-        if ptr == NULL_PTR {
-            return STATUS_INVALID_REQUEST;
+    proc K::transfer_state(
+        contract_id: UInt64,
+        source_domain: UInt8,
+        target_domain: UInt8,
+        protection: UInt64,
+        policy_flags: UInt64,
+        logical_timestamp: UInt32
+    ) -> UInt32 {
+        if contract_id == 0 {
+            return STATUS_INVALID_CONTRACT;
+        }
+
+        let valid_source = is_valid_domain(source_domain);
+        if valid_source == 1 {
         } else {
-            if target_domain == DOMAIN_K {
-                return STATUS_INVALID_REQUEST;
+            return STATUS_INVALID_DOMAIN;
+        }
+
+        let valid_target = is_valid_domain(target_domain);
+        if valid_target == 1 {
+        } else {
+            return STATUS_INVALID_DOMAIN;
+        }
+
+        let transfer = is_transfer_allowed(source_domain, target_domain, policy_flags);
+        if transfer == 1 {
+        } else {
+            return STATUS_TRANSFER_POLICY_DENIED;
+        }
+
+        if source_domain == target_domain {
+        } else {
+            let atomic = enforce_atomic_transfer(policy_flags);
+            if atomic == STATUS_OK {
             } else {
-                return STATUS_DOMAIN_UNAVAILABLE;
+                return atomic;
             }
         }
+
+        let protection_status = validate_domain_protection(target_domain, protection);
+        if protection_status == STATUS_OK {
+        } else {
+            return protection_status;
+        }
+
+        if source_domain == DOMAIN_Q {
+            let no_clone = validate_no_clone_policy(source_domain, protection);
+            if no_clone == STATUS_OK {
+            } else {
+                return no_clone;
+            }
+        }
+
+        if source_domain == DOMAIN_PHI {
+            let coherence = validate_coherence_policy(source_domain, protection);
+            if coherence == STATUS_OK {
+            } else {
+                return coherence;
+            }
+        }
+
+        if logical_timestamp == 0 {
+            return STATUS_INVALID_REQUEST;
+        }
+
+        return STATUS_OK;
+    }
+
+    proc K::transfer_qstate_with_policy(
+        ptr: UInt64,
+        target_domain: UInt8,
+        policy_flags: UInt64,
+        capability_token: UInt64,
+        logical_timestamp: UInt32
+    ) -> UInt32 {
+        if ptr == NULL_PTR {
+            return STATUS_INVALID_REQUEST;
+        }
+
+        let protection = MEM_PROT_READ + MEM_PROT_QSTATE + MEM_PROT_NO_CLONE;
+        let contract_id = create_memory_contract(
+            1,
+            DOMAIN_Q,
+            target_domain,
+            64,
+            protection,
+            capability_token,
+            policy_flags,
+            logical_timestamp
+        );
+
+        return transfer_state(contract_id, DOMAIN_Q, target_domain, protection, policy_flags, logical_timestamp);
+    }
+
+    proc K::transfer_qstate(ptr: UInt64, target_domain: UInt8) -> UInt32 {
+        let default_policy = TRANSFER_POLICY_ATOMIC + TRANSFER_POLICY_Q_TO_K_MEASURE;
+        return transfer_qstate_with_policy(ptr, target_domain, default_policy, 1, 1);
+    }
+
+    proc K::transfer_phi_state_with_policy(
+        ptr: UInt64,
+        target_domain: UInt8,
+        policy_flags: UInt64,
+        capability_token: UInt64,
+        logical_timestamp: UInt32
+    ) -> UInt32 {
+        if ptr == NULL_PTR {
+            return STATUS_INVALID_REQUEST;
+        }
+
+        let protection = MEM_PROT_READ + MEM_PROT_PHISTATE + MEM_PROT_NO_CLONE + MEM_PROT_COHERENCE;
+        let contract_id = create_memory_contract(
+            1,
+            DOMAIN_PHI,
+            target_domain,
+            64,
+            protection,
+            capability_token,
+            policy_flags,
+            logical_timestamp
+        );
+
+        return transfer_state(contract_id, DOMAIN_PHI, target_domain, protection, policy_flags, logical_timestamp);
     }
 
     proc K::validate_phi_coherence(ptr: UInt64) -> UInt32 {
         if ptr == NULL_PTR {
             return STATUS_INVALID_REQUEST;
         } else {
-            return STATUS_DOMAIN_UNAVAILABLE;
+            let domain = resolve_domain_from_ptr(ptr);
+            if domain == DOMAIN_PHI {
+                return STATUS_OK;
+            } else {
+                return STATUS_COHERENCE_VIOLATION;
+            }
         }
     }
 
     proc K::get_domain_memory_stats(domain: UInt8) -> UInt64 {
-        if domain == DOMAIN_K {
-            return SHARED_POOL_SIZE;
+        let valid = is_valid_domain(domain);
+        if valid == 1 {
+            return region_size(domain);
         } else {
             return MEMORY_STATS_UNAVAILABLE;
         }
     }
 
     proc K::get_total_memory_usage() -> UInt64 {
-        return SHARED_POOL_SIZE;
+        return K_REGION_SIZE + Q_REGION_SIZE + PHI_REGION_SIZE + SHARED_POOL_SIZE;
     }
 
     proc K::check_memory_protection(ptr: UInt64, protection: UInt64) -> UInt32 {
         if ptr == NULL_PTR {
             return STATUS_INVALID_REQUEST;
         } else {
-            if protection == MEM_PROT_NONE {
-                return STATUS_INVALID_REQUEST;
+            let domain = resolve_domain_from_ptr(ptr);
+            if domain == DOMAIN_INVALID {
+                return STATUS_INVALID_DOMAIN;
             } else {
-                return STATUS_OK;
+                return validate_domain_protection(domain, protection);
             }
         }
     }
@@ -164,4 +790,29 @@ forge XdvUmf {
     proc K::set_memory_protection(ptr: UInt64, protection: UInt64) -> UInt32 {
         return check_memory_protection(ptr, protection);
     }
+
+    proc K::xdv_umf_interface_version_major() -> UInt32 {
+        return UMF_INTERFACE_VERSION_MAJOR;
+    }
+
+    proc K::xdv_umf_interface_version_minor() -> UInt32 {
+        return UMF_INTERFACE_VERSION_MINOR;
+    }
+
+    proc K::xdv_umf_interface_version_patch() -> UInt32 {
+        return UMF_INTERFACE_VERSION_PATCH;
+    }
+
+    proc K::xdv_umf_contract_api_version() -> UInt32 {
+        return UMF_CONTRACT_API_VERSION;
+    }
+
+    proc K::xdv_umf_isolation_api_version() -> UInt32 {
+        return UMF_ISOLATION_API_VERSION;
+    }
+
+    proc K::xdv_umf_transfer_api_version() -> UInt32 {
+        return UMF_TRANSFER_API_VERSION;
+    }
 }
+
